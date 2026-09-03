@@ -14,6 +14,48 @@ _TRANSFORMERS_MODEL = None
 _TRANSFORMERS_PROCESSOR = None
 
 
+def _popo_endpoints():
+    """推理端点列表：[(url, key, model), ...]，数组顺序=优先级，第一项为默认。
+
+    来自 POPO_CONFIGS (JSON list)：[{"name","url","api_key","model"}, ...]；
+    连接失败/超时自动尝试列表中的下一项（由调用方循环实现）。
+    未配置 POPO_CONFIGS 时兼容旧变量 POPO_VLLM_URL(+_FALLBACK)。
+    """
+    raw = os.environ.get("POPO_CONFIGS", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            print("POPO_CONFIGS 非法 JSON，忽略")
+            data = None
+        if isinstance(data, list) and data:
+            endpoints = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                key = str(item.get("api_key") or "").strip()
+                model = str(item.get("model") or "").strip() or "Popo"
+                endpoints.append((url, key, model))
+            if endpoints:
+                return endpoints
+    # 兼容旧变量
+    primary_url = os.environ.get("POPO_VLLM_URL", "").strip()
+    if not primary_url:
+        return []
+    primary_key = os.environ.get("POPO_VLLM_API_KEY", "").strip()
+    primary_model = os.environ.get("POPO_MODEL_NAME", "Popo").strip() or "Popo"
+    endpoints = [(primary_url, primary_key, primary_model)]
+    fallback_url = os.environ.get("POPO_VLLM_URL_FALLBACK", "").strip()
+    if fallback_url:
+        fallback_key = os.environ.get("POPO_VLLM_API_KEY_FALLBACK", "").strip() or primary_key
+        fallback_model = os.environ.get("POPO_MODEL_NAME_FALLBACK", "").strip() or primary_model
+        endpoints.append((fallback_url, fallback_key, fallback_model))
+    return endpoints
+
+
 def _transformers_generate(prompt, base64_image):
     global _TRANSFORMERS_MODEL, _TRANSFORMERS_PROCESSOR
     import torch
@@ -75,20 +117,11 @@ def popo_generate(prompt, base64_image):
 
     from openai import OpenAI
 
-    url = os.environ.get("POPO_VLLM_URL", "").strip()
-    key = os.environ.get("POPO_VLLM_API_KEY", "").strip()
-    base_model = os.environ.get("POPO_MODEL_NAME", "Popo").strip() or "Popo"
-    client = OpenAI(
-        base_url=url or None,
-        api_key=key or None,
-        timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
-    )
+    endpoints = _popo_endpoints()
     res = ""
-    cnt = 0
     prompt = prompt[:100000] if len(prompt)>100000 else prompt
     max_tokens = int(os.environ.get("POPO_MAX_TOKENS", "4096"))
-    
-    
+
     if base64_image:
         messages = [
             {
@@ -114,41 +147,45 @@ def popo_generate(prompt, base64_image):
             }
         ]
 
-    while cnt < 5:
+    last_error = None
+    for url, key, base_model in endpoints:
         try:
-            response = client.chat.completions.create(
-                model=base_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature = 1
+            client = OpenAI(
+                base_url=url or None,
+                api_key=key or None,
+                timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
             )
-            res = response.choices[0].message.content
-
-            return res
-
+            cnt = 0
+            while cnt < 2:
+                try:
+                    response = client.chat.completions.create(
+                        model=base_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=1,
+                    )
+                    res = response.choices[0].message.content
+                    return res
+                except Exception as e:
+                    cnt += 1
+                    last_error = e
+                    print(e)
+            raise last_error
         except Exception as e:
-            cnt += 1
-            print(e)
+            last_error = e
+            print(f"POPO endpoint {url} failed: {e}")
 
     return ""
 
 def qwen_generate(prompt, base64_image):
     from openai import OpenAI
 
-    url = os.environ.get("POPO_VLLM_URL", "").strip()
-    key = os.environ.get("POPO_VLLM_API_KEY", "").strip()
+    endpoints = _popo_endpoints()
     base_model = "Qwen3-VL-4B-Instruct"
-    client = OpenAI(
-        base_url=url or None,
-        api_key=key or None,
-        timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
-    )
     res = ""
-    cnt = 0
     prompt = prompt[:100000] if len(prompt)>100000 else prompt
     max_tokens = int(os.environ.get("POPO_MAX_TOKENS", "4096"))
-    
-    
+
     if base64_image:
         messages = [
             {
@@ -174,41 +211,44 @@ def qwen_generate(prompt, base64_image):
             }
         ]
 
-    while cnt < 5:
+    for url, key, _model in endpoints:
         try:
-            response = client.chat.completions.create(
-                model=base_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature = 1
+            client = OpenAI(
+                base_url=url or None,
+                api_key=key or None,
+                timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
             )
-            res = response.choices[0].message.content
+            cnt = 0
+            while cnt < 2:
+                try:
+                    response = client.chat.completions.create(
+                        model=base_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature = 1
+                    )
+                    res = response.choices[0].message.content
 
-            return res
+                    return res
 
+                except Exception as e:
+                    cnt += 1
+                    print(e)
+            raise RuntimeError("all retries failed")
         except Exception as e:
-            cnt += 1
-            print(e)
+            print(f"POPO endpoint {url} failed: {e}")
 
     return ""
 
 def gpt_generate(prompt, base64_image):#gemini-3-pro-preview
     from openai import OpenAI
 
-    url = os.environ.get("POPO_VLLM_URL", "").strip()
-    key = os.environ.get("POPO_VLLM_API_KEY", "").strip()
+    endpoints = _popo_endpoints()
     base_model = "gemini-3-flash-preview"
-    client = OpenAI(
-        base_url=url or None,
-        api_key=key or None,
-        timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
-    )
     res = ""
-    cnt = 0
     prompt = prompt[:100000] if len(prompt)>100000 else prompt
     max_tokens = int(os.environ.get("POPO_MAX_TOKENS", "4096"))
-    
-    
+
     if base64_image:
         messages = [
             {
@@ -234,19 +274,30 @@ def gpt_generate(prompt, base64_image):#gemini-3-pro-preview
             }
         ]
 
-    while cnt < 5:
+    for url, key, _model in endpoints:
         try:
-            response = client.chat.completions.create(
-                model=base_model,
-                messages=messages,
-                temperature = 1
+            client = OpenAI(
+                base_url=url or None,
+                api_key=key or None,
+                timeout=float(os.environ.get("POPO_API_TIMEOUT", "300")),
             )
-            res = response.choices[0].message.content
+            cnt = 0
+            while cnt < 2:
+                try:
+                    response = client.chat.completions.create(
+                        model=base_model,
+                        messages=messages,
+                        temperature = 1
+                    )
+                    res = response.choices[0].message.content
 
-            return res
+                    return res
 
+                except Exception as e:
+                    cnt += 1
+                    print(e)
+            raise RuntimeError("all retries failed")
         except Exception as e:
-            cnt += 1
-            print(e)
+            print(f"POPO endpoint {url} failed: {e}")
 
     return ""
