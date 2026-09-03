@@ -19,40 +19,27 @@ def _popo_endpoints():
 
     来自 POPO_CONFIGS (JSON list)：[{"name","url","api_key","model"}, ...]；
     连接失败/超时自动尝试列表中的下一项（由调用方循环实现）。
-    未配置 POPO_CONFIGS 时兼容旧变量 POPO_VLLM_URL(+_FALLBACK)。
     """
     raw = os.environ.get("POPO_CONFIGS", "").strip()
-    if raw:
-        try:
-            data = json.loads(raw)
-        except Exception:
-            print("POPO_CONFIGS 非法 JSON，忽略")
-            data = None
-        if isinstance(data, list) and data:
-            endpoints = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("url") or "").strip()
-                if not url:
-                    continue
-                key = str(item.get("api_key") or "").strip()
-                model = str(item.get("model") or "").strip() or "Popo"
-                endpoints.append((url, key, model))
-            if endpoints:
-                return endpoints
-    # 兼容旧变量
-    primary_url = os.environ.get("POPO_VLLM_URL", "").strip()
-    if not primary_url:
+    if not raw:
         return []
-    primary_key = os.environ.get("POPO_VLLM_API_KEY", "").strip()
-    primary_model = os.environ.get("POPO_MODEL_NAME", "Popo").strip() or "Popo"
-    endpoints = [(primary_url, primary_key, primary_model)]
-    fallback_url = os.environ.get("POPO_VLLM_URL_FALLBACK", "").strip()
-    if fallback_url:
-        fallback_key = os.environ.get("POPO_VLLM_API_KEY_FALLBACK", "").strip() or primary_key
-        fallback_model = os.environ.get("POPO_MODEL_NAME_FALLBACK", "").strip() or primary_model
-        endpoints.append((fallback_url, fallback_key, fallback_model))
+    try:
+        data = json.loads(raw)
+    except Exception:
+        print("POPO_CONFIGS 非法 JSON，忽略")
+        return []
+    if not isinstance(data, list):
+        return []
+    endpoints = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        key = str(item.get("api_key") or "").strip()
+        model = str(item.get("model") or "").strip() or "Popo"
+        endpoints.append((url, key, model))
     return endpoints
 
 
